@@ -7,6 +7,14 @@ name = "quant-engine-py"
 version = "0.0.1"
 description = "nanobind bindings for quant-engine"
 requires-python = ">=3.10"
+# numpy is a RUNTIME dependency, not just a test one: every bar column
+# comes back as `nb::ndarray<nb::numpy, ...>`, which fails to export
+# with `ModuleNotFoundError: No module named 'numpy'` the first time a
+# caller touches `.close`. Missed until a fresh clone was built from
+# the README's own steps, where seven tests died on it: the dev venv
+# had numpy installed by hand, so nothing ever asked where it came
+# from.
+dependencies = ["numpy>=1.23"]
 
 [tool.scikit-build]
 minimum-version = "0.10"

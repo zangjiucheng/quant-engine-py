@@ -63,7 +63,7 @@ that one segfaulting mkdocs.
 ```bash
 git submodule update --init --recursive
 ~/.pyenv/versions/3.12.2/bin/python -m venv .venv
-.venv/bin/pip install scikit-build-core nanobind
+.venv/bin/pip install scikit-build-core nanobind   # build backend only
 export VCPKG_ROOT=$HOME/vcpkg
 .venv/bin/pip install --no-build-isolation -e .
 .venv/bin/python -m unittest discover -s tests -v
