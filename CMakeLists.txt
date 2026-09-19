@@ -43,22 +43,14 @@ set(QE_BUILD_TESTS      OFF CACHE BOOL "" FORCE)
 set(QE_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
 set(QE_BUILD_APPS       OFF CACHE BOOL "" FORCE)
 set(QE_BUILD_DASHBOARD  OFF CACHE BOOL "" FORCE)
-# SHIM, deletable once the submodule pin moves past the fix.
-#
-# quant-engine v0.4.2's CMakeLists appends "${CMAKE_SOURCE_DIR}/cmake"
-# to CMAKE_MODULE_PATH — the TOP-LEVEL source dir, which under
-# `add_subdirectory` is this project, not the engine. Its
-# `include(QeCodesign)` then resolved against the wrong tree and the
-# configure died on `Unknown CMake command "qe_codesign_setup"`. Every
-# other path in that file already used CMAKE_CURRENT_SOURCE_DIR; this
-# one line was the exception, and being consumed as a subdirectory is
-# what surfaced it.
-#
-# Fixed upstream on main. The pin is a TAG (v0.4.2), by design, so the
-# fix is not here yet and will arrive with v0.4.3 — at which point this
-# block goes away. Prepending costs nothing while it is redundant.
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/extern/quant-engine/cmake")
-
+# No CMAKE_MODULE_PATH shim here any more. v0.4.2 needed one: its
+# CMakeLists appended "${CMAKE_SOURCE_DIR}/cmake" — the TOP-LEVEL
+# source dir, which under `add_subdirectory` is THIS project — so
+# `include(QeCodesign)` looked in the wrong tree and configure died on
+# `Unknown CMake command "qe_codesign_setup"`. Fixed in the engine at
+# v0.4.3 (CMAKE_CURRENT_SOURCE_DIR, matching every other path in that
+# file). If this configure ever fails that way again, the pin went
+# backwards.
 add_subdirectory(extern/quant-engine EXCLUDE_FROM_ALL)
 
 # ---- what version did we actually build against? ---------------------

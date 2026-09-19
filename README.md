@@ -81,7 +81,7 @@ engine hot loop. Bars/numpy marshalling is S3 and the `.qe` path is S4.
 
 ```python
 import qe
-qe.engine_version          # '0.4.2', from the engine's own header
+qe.engine_version          # '0.4.3', from the engine's own header
 
 # bars — SoA in, numpy views out
 s  = qe.BarSeries.from_arrays(timestamps=..., open=..., high=...,
