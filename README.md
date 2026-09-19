@@ -170,6 +170,25 @@ engine's storage rule is struct-of-arrays, and a list-of-structs is the
 one shape neither side wants. Mismatched lengths raise rather than zip
 to the shorter one, which would misdate every point after the gap.
 
+## The boundary is held by a test, not by intent
+
+`tests/test_hot_loop_boundary.py` (PER-244) enforces the rule at the
+top of this file two ways:
+
+* **behaviourally** — it counts Python frames entered while the engine
+  runs a 5000-bar backtest, and requires ~0. This is the direct
+  analogue of the engine's `test_zero_alloc.cpp` counting allocations:
+  it measures the property rather than a proxy.
+* **structurally** — it sweeps every bound signature and fails if any
+  takes a callable, since that is how a callback would have to arrive.
+
+Both were driven red before being trusted. A temporary binding that
+invoked a Python callable from C++ once per bar produced exactly 5000
+frames for 5000 bars and tripped the structural sweep by name; it was
+then removed. The test's own positive control is a pure-Python loop,
+and its docstring says so rather than implying more coverage than it
+has.
+
 ## Why nanobind and not pybind11
 
 Measured, not assumed. Same function, same flags, same Python:
