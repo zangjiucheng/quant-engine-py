@@ -29,8 +29,10 @@ import subprocess
 
 from qe import _core
 from qe._core import (
+    BarSeries,
     IcResult,
     LongShortResult,
+    MultiBarSeries,
     RollingIcResult,
     RollingIcWindow,
     cagr,
@@ -45,6 +47,9 @@ from qe._core import (
 )
 
 __all__ = [
+    # data
+    "BarSeries",
+    "MultiBarSeries",
     # results
     "IcResult",
     "LongShortResult",

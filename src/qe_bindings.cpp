@@ -21,6 +21,8 @@
 /// voids every number in CLAUDE.md's performance table.
 
 #include "qe/analytics/ic.hpp"
+#include "qe/data/multi_series.hpp"
+#include "qe/data/series.hpp"
 #include "qe/analytics/long_short.hpp"
 #include "qe/analytics/metrics.hpp"
 #include "qe/analytics/rolling_ic.hpp"
@@ -28,12 +30,59 @@
 #include "qe/version.hpp"
 
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/string_view.h>
 #include <nanobind/stl/vector.h>
 
 #include <string>
 
 namespace nb = nanobind;
+
+namespace {
+
+/// Explain a failed `BarSeries::invariants_ok()`.
+///
+/// The BOOL is authoritative — this only turns it into a sentence. The
+/// two are deliberately separate: a diagnostic that could disagree with
+/// the gate would eventually be trusted over it. When nothing here
+/// matches, say so rather than inventing a cause.
+[[nodiscard]] std::string qe_bars_diagnosis(const qe::data::BarSeries& s) {
+    const std::size_t n = s.close.size();
+    auto              ragged = [&](const char* name, std::size_t got) {
+        return std::string{"column '"} + name + "' has " + std::to_string(got) +
+               " rows but 'close' has " + std::to_string(n) +
+               " — every column of a bar series is the same length by construction";
+    };
+    if (s.timestamps.size() != n) {
+        return ragged("timestamps", s.timestamps.size());
+    }
+    if (s.open.size() != n) {
+        return ragged("open", s.open.size());
+    }
+    if (s.high.size() != n) {
+        return ragged("high", s.high.size());
+    }
+    if (s.low.size() != n) {
+        return ragged("low", s.low.size());
+    }
+    if (s.volume.size() != n) {
+        return ragged("volume", s.volume.size());
+    }
+    for (std::size_t i = 1; i < n; ++i) {
+        if (s.timestamps[i] < s.timestamps[i - 1]) {
+            return "timestamps decrease at index " + std::to_string(i) + " (" +
+                   std::to_string(s.timestamps[i - 1]) + " -> " + std::to_string(s.timestamps[i]) +
+                   "). The engine fills at bar i+1's open and assumes an ordered grid; an "
+                   "unordered series breaks that silently and nothing downstream can detect it. "
+                   "Equal adjacent timestamps are permitted, decreasing ones are not.";
+        }
+    }
+    return "BarSeries::invariants_ok() failed for a reason this diagnostic does not model";
+}
+
+}  // namespace
 
 NB_MODULE(_core, m) {
     m.doc() = "quant-engine bindings (nanobind). Python drives; Python does not participate.";
@@ -50,6 +99,138 @@ NB_MODULE(_core, m) {
     m.attr("__engine_version__")  = std::string(qe::KVersion);
     m.attr("__engine_commit__")   = QE_ENGINE_COMMIT;
     m.attr("__engine_describe__") = QE_ENGINE_DESCRIBE;
+
+    // ---- bars: the SoA layout, as numpy views (S3 / PER-241) -------
+    //
+    // `BarSeries` is parallel std::vector<double> by architectural rule
+    // — CLAUDE.md "Struct-of-Arrays, always" — which is exactly what
+    // numpy wants. These are VIEWS over the engine's own buffers, not
+    // copies.
+    //
+    // `rv_policy::reference_internal` states the intent: the array
+    // borrows, and the owner must outlive it.
+    //
+    // HONESTLY: it could not be shown to be load-bearing. Removing it
+    // from `.close` and rebuilding leaves every test green, including a
+    // weakref probe that decides ownership rather than inferring it —
+    // nanobind appears to tie the parent for property returns either
+    // way. The policy stays because it is the documented way to ask for
+    // what this code needs and costs nothing, NOT because a test proved
+    // its absence breaks anything. Do not read the test below as
+    // covering it.
+    //
+    // What the test does cover is the PROPERTY — owner alive while a
+    // view is held, released after — which is what callers depend on
+    // whichever mechanism supplies it.
+    //
+    // Read-only (`const double`): the engine's buffers are not Python's
+    // to write through, and a per-bar mutation surface is the hot-loop
+    // boundary of PER-244 wearing a different hat.
+    using Arr64  = nb::ndarray<nb::numpy, const double, nb::ndim<1>>;
+    using ArrI64 = nb::ndarray<nb::numpy, const std::int64_t, nb::ndim<1>>;
+
+    auto col = [](const std::vector<double>& v) {
+        return Arr64(v.data(), {v.size()});
+    };
+    auto col_i64 = [](const std::vector<std::int64_t>& v) {
+        return ArrI64(v.data(), {v.size()});
+    };
+
+    // `is_weak_referenceable` so the ownership contract below can be
+    // TESTED rather than asserted. Without it the first version of
+    // `test_a_view_outlives_its_owner` passed with the keep-alive
+    // policy REMOVED — it was reading freed-but-not-yet-reused memory
+    // and calling that success.
+    nb::class_<qe::data::BarSeries>(m, "BarSeries", nb::is_weak_referenceable())
+        .def(nb::init<>())
+        .def_prop_ro("timestamps",
+                     [col_i64](const qe::data::BarSeries& s) { return col_i64(s.timestamps); },
+                     nb::rv_policy::reference_internal, "int64 ns since the Unix epoch.")
+        .def_prop_ro("open", [col](const qe::data::BarSeries& s) { return col(s.open); },
+                     nb::rv_policy::reference_internal)
+        .def_prop_ro("high", [col](const qe::data::BarSeries& s) { return col(s.high); },
+                     nb::rv_policy::reference_internal)
+        .def_prop_ro("low", [col](const qe::data::BarSeries& s) { return col(s.low); },
+                     nb::rv_policy::reference_internal)
+        .def_prop_ro("close", [col](const qe::data::BarSeries& s) { return col(s.close); },
+                     nb::rv_policy::reference_internal)
+        .def_prop_ro("volume", [col](const qe::data::BarSeries& s) { return col(s.volume); },
+                     nb::rv_policy::reference_internal)
+        .def("__len__", &qe::data::BarSeries::size)
+        .def_static(
+            "from_arrays",
+            [](const std::vector<std::int64_t>& timestamps, const std::vector<double>& open,
+               const std::vector<double>& high, const std::vector<double>& low,
+               const std::vector<double>& close, const std::vector<double>& volume) {
+                qe::data::BarSeries s;
+                s.timestamps = timestamps;
+                s.open       = open;
+                s.high       = high;
+                s.low        = low;
+                s.close      = close;
+                s.volume     = volume;
+                // The engine's OWN validator decides. Writing a second
+                // set of checks here would be a second opinion that can
+                // drift from the one the engine actually enforces.
+                if (!s.invariants_ok()) {
+                    throw nb::value_error(qe_bars_diagnosis(s).c_str());
+                }
+                return s;
+            },
+            nb::arg("timestamps"), nb::arg("open"), nb::arg("high"), nb::arg("low"),
+            nb::arg("close"), nb::arg("volume"),
+            "Build from columns. Refuses ragged columns and out-of-order "
+            "timestamps: unordered bars break the engine's look-ahead "
+            "guarantee silently, and nothing downstream can detect it.");
+
+    nb::class_<qe::data::MultiBarSeries>(m, "MultiBarSeries")
+        .def(nb::init<>())
+        .def_ro("symbols", &qe::data::MultiBarSeries::symbols)
+        .def_prop_ro("timestamps",
+                     [col_i64](const qe::data::MultiBarSeries& s) { return col_i64(s.timestamps); },
+                     nb::rv_policy::reference_internal,
+                     "The aligned master grid. EMPTY until align_intersection() runs — "
+                     "before that the per-symbol grids may legitimately differ.")
+        .def_prop_ro("bars",
+                     [](qe::data::MultiBarSeries& s) { return &s.bars; },
+                     nb::rv_policy::reference_internal,
+                     "Symbol-major: bars[i] belongs to symbols[i].")
+        .def("symbol_index", &qe::data::MultiBarSeries::symbol_index, nb::arg("name"),
+             "Index of `name`, or None. The engine's hot loop uses indices and never "
+             "names; this is the lookup you do ONCE.")
+        .def("symbol_count", &qe::data::MultiBarSeries::symbol_count)
+        .def("bar_count", &qe::data::MultiBarSeries::bar_count)
+        .def("__len__", &qe::data::MultiBarSeries::symbol_count)
+        .def(
+            "align_intersection",
+            [](qe::data::MultiBarSeries& s) {
+                auto r = s.align_intersection();
+                if (!r) {
+                    throw nb::value_error(r.error().message.c_str());
+                }
+            },
+            "Reduce every symbol to the common timestamp grid. Raises rather than "
+            "returning a partial alignment.")
+        .def_static(
+            "from_series",
+            [](const std::vector<std::string>&      symbols,
+               const std::vector<qe::data::BarSeries>& series) {
+                if (symbols.size() != series.size()) {
+                    throw nb::value_error(
+                        "symbols and series must be the same length — symbol-major "
+                        "indexing is the engine's whole addressing scheme, and a "
+                        "shorter zip would attach the right bars to the wrong name");
+                }
+                qe::data::MultiBarSeries mb;
+                for (std::size_t i = 0; i < symbols.size(); ++i) {
+                    mb.add_symbol(symbols[i], series[i]);
+                }
+                if (!mb.invariants_ok()) {
+                    throw nb::value_error("MultiBarSeries invariants failed after assembly");
+                }
+                return mb;
+            },
+            nb::arg("symbols"), nb::arg("series"));
 
     nb::class_<qe::analytics::IcResult>(m, "IcResult")
         .def_ro("n_bars", &qe::analytics::IcResult::n_bars)

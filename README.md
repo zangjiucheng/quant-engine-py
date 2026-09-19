@@ -83,6 +83,13 @@ engine hot loop. Bars/numpy marshalling is S3 and the `.qe` path is S4.
 import qe
 qe.engine_version          # '0.4.2', from the engine's own header
 
+# bars — SoA in, numpy views out
+s  = qe.BarSeries.from_arrays(timestamps=..., open=..., high=...,
+                              low=..., close=..., volume=...)
+mb = qe.MultiBarSeries.from_series(symbols=["AAA", "BBB"], series=[s, s2])
+mb.align_intersection()
+mb.bars[mb.symbol_index("AAA")].close    # read-only float64 view
+
 qe.ic_analysis(factor=..., returns=..., horizon=20)
 qe.rolling_ic_analysis(factor=..., returns=..., timestamps=...,
                        horizon=20, window_bars=120, step_bars=20)
@@ -113,6 +120,21 @@ shape mismatch with `n_obs == 0`; `rolling_ic_analysis` with an empty
 rather than `0.0`, because `0.0` reads as a flat curve and `NaN` reads
 as no answer. `long_short_backtest` counts dropped rebalances in
 `n_skipped` — read it before you read `sharpe`.
+
+**Bar columns are views, not copies.** `BarSeries` is parallel
+`std::vector<double>` by architectural rule, so a column comes back as
+a read-only numpy array over the engine's own buffer — no copy, and
+the owner is kept alive underneath it. Read-only deliberately: the
+engine's buffers are not Python's to write through, and a per-bar
+mutation surface is the hot-loop boundary in a different costume.
+
+`MultiBarSeries.timestamps` is **empty until `align_intersection()`**.
+Before alignment the per-symbol grids may legitimately differ, and the
+field says so by being empty rather than by picking one of them.
+`from_arrays` refuses ragged columns and decreasing timestamps, using
+the engine's own `invariants_ok()` as the gate rather than a second
+opinion that could drift from it — an unordered grid breaks the
+engine's look-ahead guarantee silently.
 
 The `metrics` functions take parallel `timestamps_ns` / `equity` arrays
 rather than a bound `EquityPoint` list: the caller side is numpy, the
