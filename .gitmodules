@@ -1,0 +1,3 @@
+[submodule "extern/quant-engine"]
+	path = extern/quant-engine
+	url = git@git.sr.ht:~jzhex/quant-engine

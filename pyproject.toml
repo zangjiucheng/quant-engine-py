@@ -1,0 +1,14 @@
+[build-system]
+requires = ["scikit-build-core >=0.10", "nanobind >=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "quant-engine-py"
+version = "0.0.1"
+description = "nanobind bindings for quant-engine"
+requires-python = ">=3.10"
+
+[tool.scikit-build]
+minimum-version = "0.10"
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["src/qe"]
