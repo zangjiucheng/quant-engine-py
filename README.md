@@ -75,16 +75,50 @@ Benchmark are never built to produce a Python module.
 
 ## Surface
 
-One function today — `ic_analysis`. S1 is about the repo, the version
-alignment and the parity harness; the surface itself is S3 (numpy
-marshalling), S4 (the `.qe` path) and S5 (the rest of analytics).
+The standalone analytics (S1 + S5). Everything here takes plain series
+and returns plain results — no config machinery, no provenance, no
+engine hot loop. Bars/numpy marshalling is S3 and the `.qe` path is S4.
 
 ```python
 import qe
 qe.engine_version          # '0.4.2', from the engine's own header
-r = qe.ic_analysis(factor=..., returns=..., horizon=20)
-r.xs_ic_mean, r.xs_ic_t_stat_nw, r.n_obs
+
+qe.ic_analysis(factor=..., returns=..., horizon=20)
+qe.rolling_ic_analysis(factor=..., returns=..., timestamps=...,
+                       horizon=20, window_bars=120, step_bars=20)
+qe.long_short_backtest(factor=..., returns=..., timestamps=...,
+                       quantiles=5, rebalance_bars=21,
+                       holding_periods_per_year=12.0, commission_bps=5.0)
+
+qe.kahan_sum(xs)
+qe.sharpe(rets, periods_per_year=252, rf_annual=0.0)
+qe.sortino(rets, periods_per_year=252, rf_annual=0.0)
+qe.total_return(timestamps_ns=..., equity=...)
+qe.cagr(timestamps_ns=..., equity=..., periods_per_year=252)
+qe.max_drawdown(timestamps_ns=..., equity=...)
 ```
+
+Two things worth knowing before you read a number:
+
+**Drawdown has two sign conventions in `qe::analytics`, and this is not
+the binding's doing.** `max_drawdown` documents *a positive fraction*
+(0.25 = gave back a quarter), while `LongShortResult.max_dd` documents
+*the most negative excursion* and reports e.g. `-0.202`. Compare like
+with like. A test pins both so no future change quietly normalises one
+into the other.
+
+**Degenerate input is reported, not raised.** `ic_analysis` answers a
+shape mismatch with `n_obs == 0`; `rolling_ic_analysis` with an empty
+`windows`; the `metrics` curve functions with `NaN` below two points
+rather than `0.0`, because `0.0` reads as a flat curve and `NaN` reads
+as no answer. `long_short_backtest` counts dropped rebalances in
+`n_skipped` — read it before you read `sharpe`.
+
+The `metrics` functions take parallel `timestamps_ns` / `equity` arrays
+rather than a bound `EquityPoint` list: the caller side is numpy, the
+engine's storage rule is struct-of-arrays, and a list-of-structs is the
+one shape neither side wants. Mismatched lengths raise rather than zip
+to the shorter one, which would misdate every point after the gap.
 
 ## Why nanobind and not pybind11
 

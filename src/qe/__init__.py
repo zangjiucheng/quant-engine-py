@@ -28,9 +28,44 @@ import pathlib
 import subprocess
 
 from qe import _core
-from qe._core import IcResult, ic_analysis
+from qe._core import (
+    IcResult,
+    LongShortResult,
+    RollingIcResult,
+    RollingIcWindow,
+    cagr,
+    ic_analysis,
+    kahan_sum,
+    long_short_backtest,
+    max_drawdown,
+    rolling_ic_analysis,
+    sharpe,
+    sortino,
+    total_return,
+)
 
-__all__ = ["IcResult", "ic_analysis", "engine_version", "engine_commit", "StaleBindingError"]
+__all__ = [
+    # results
+    "IcResult",
+    "LongShortResult",
+    "RollingIcResult",
+    "RollingIcWindow",
+    # analytics
+    "cagr",
+    "ic_analysis",
+    "kahan_sum",
+    "long_short_backtest",
+    "max_drawdown",
+    "rolling_ic_analysis",
+    "sharpe",
+    "sortino",
+    "total_return",
+    # provenance
+    "engine_version",
+    "engine_commit",
+    "engine_describe",
+    "StaleBindingError",
+]
 
 engine_version = _core.__engine_version__
 engine_commit = _core.__engine_commit__

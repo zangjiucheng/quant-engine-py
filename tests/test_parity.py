@@ -65,3 +65,121 @@ class IcParity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class RollingIcParity(unittest.TestCase):
+    """PER-243 — rolling IC, same golden, same exactness."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.g = json.loads(GOLDEN.read_text())
+        p = cls.g["rolling"]["params"]
+        cls.r = qe.rolling_ic_analysis(
+            factor=cls.g["input"]["factor"],
+            returns=cls.g["input"]["returns"],
+            timestamps=cls.g["input"]["timestamps"],
+            horizon=cls.g["input"]["horizon"],
+            window_bars=p["window_bars"],
+            step_bars=p["step_bars"],
+        )
+
+    def test_not_degenerate(self):
+        # An empty `windows` is how this function reports a shape
+        # mismatch. A golden of zero windows would pass everything below.
+        self.assertGreater(self.g["rolling"]["expected"]["n_windows"], 5)
+
+    def test_scalars(self):
+        e = self.g["rolling"]["expected"]
+        for f in ("n_bars", "horizon", "window_bars", "step_bars"):
+            with self.subTest(field=f):
+                self.assertEqual(getattr(self.r, f), e[f])
+        self.assertEqual(len(self.r.windows), e["n_windows"])
+
+    def test_every_window_matches_exactly(self):
+        for i, (got, want) in enumerate(zip(self.r.windows, self.g["rolling"]["windows"])):
+            for f, v in want.items():
+                with self.subTest(window=i, field=f):
+                    self.assertEqual(getattr(got, f), v)
+
+
+class LongShortParity(unittest.TestCase):
+    """PER-243 — the quantile portfolio."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.g = json.loads(GOLDEN.read_text())
+        p = cls.g["long_short"]["params"]
+        cls.r = qe.long_short_backtest(
+            factor=cls.g["input"]["factor"],
+            returns=cls.g["input"]["returns"],
+            timestamps=cls.g["input"]["timestamps"],
+            quantiles=p["quantiles"],
+            rebalance_bars=p["rebalance_bars"],
+            holding_periods_per_year=p["holding_periods_per_year"],
+            commission_bps=p["commission_bps"],
+        )
+
+    def test_not_degenerate(self):
+        self.assertGreater(self.g["long_short"]["expected"]["n_periods"], 5)
+
+    def test_scalars(self):
+        e = self.g["long_short"]["expected"]
+        for f in ("total_return", "sharpe", "max_dd", "turnover", "n_periods", "n_skipped"):
+            with self.subTest(field=f):
+                self.assertEqual(getattr(self.r, f), e[f])
+
+    def test_series(self):
+        e = self.g["long_short"]["expected"]
+        self.assertEqual(list(self.r.equity), e["equity"])
+        self.assertEqual(list(self.r.period_returns), e["period_returns"])
+        self.assertEqual(list(self.r.period_open_ts), e["period_open_ts"])
+
+
+class MetricsParity(unittest.TestCase):
+    """PER-243 — the free functions in metrics.hpp."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.g = json.loads(GOLDEN.read_text())["metrics"]
+
+    def test_scalar_metrics(self):
+        i, e = self.g["input"], self.g["expected"]
+        self.assertEqual(qe.kahan_sum(i["rets"]), e["kahan_sum"])
+        self.assertEqual(qe.sharpe(i["rets"], 252, 0.0), e["sharpe"])
+        self.assertEqual(qe.sortino(i["rets"], 252, 0.0), e["sortino"])
+        self.assertEqual(
+            qe.total_return(timestamps_ns=i["timestamps_ns"], equity=i["equity"]),
+            e["total_return"],
+        )
+        self.assertEqual(
+            qe.cagr(timestamps_ns=i["timestamps_ns"], equity=i["equity"], periods_per_year=252),
+            e["cagr"],
+        )
+        self.assertEqual(
+            qe.max_drawdown(timestamps_ns=i["timestamps_ns"], equity=i["equity"]),
+            e["max_drawdown"],
+        )
+
+    def test_drawdown_sign_convention_is_positive(self):
+        # Two functions in qe::analytics disagree on this and the clash
+        # is not the binding's invention: metrics.max_drawdown documents
+        # a POSITIVE fraction, LongShortResult.max_dd documents the most
+        # NEGATIVE excursion. Pinned here so a future binding change
+        # cannot quietly "normalise" one into the other.
+        self.assertGreater(self.g["expected"]["max_drawdown"], 0.0)
+        self.assertEqual(
+            qe.max_drawdown(timestamps_ns=[0, 1, 2, 3], equity=[100.0, 120.0, 90.0, 110.0]), 0.25
+        )
+
+    def test_mismatched_equity_lengths_raise(self):
+        # Zipping to the shorter one would misdate every point after the
+        # first gap, silently.
+        with self.assertRaises(ValueError):
+            qe.max_drawdown(timestamps_ns=[0, 1, 2], equity=[100.0, 110.0])
+
+    def test_too_short_is_nan_not_zero(self):
+        # 0.0 would read as "a flat curve"; NaN reads as "no answer".
+        import math
+
+        self.assertTrue(math.isnan(qe.max_drawdown(timestamps_ns=[0], equity=[100.0])))
+        self.assertTrue(math.isnan(qe.total_return(timestamps_ns=[0], equity=[100.0])))
