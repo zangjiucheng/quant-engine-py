@@ -90,6 +90,11 @@ mb = qe.MultiBarSeries.from_series(symbols=["AAA", "BBB"], series=[s, s2])
 mb.align_intersection()
 mb.bars[mb.symbol_index("AAA")].close    # read-only float64 view
 
+# a .qe, evaluated and run
+cfg  = qe.load_qe("strategy.qe")         # .kind, .capital, .leg_symbols
+bars = qe.load_bars(cfg)                 # resolve its data specs
+res  = qe.run_backtest(cfg, bars)        # combined_equity, per_strategy
+
 qe.ic_analysis(factor=..., returns=..., horizon=20)
 qe.rolling_ic_analysis(factor=..., returns=..., timestamps=...,
                        horizon=20, window_bars=120, step_bars=20)
@@ -120,6 +125,29 @@ shape mismatch with `n_obs == 0`; `rolling_ic_analysis` with an empty
 rather than `0.0`, because `0.0` reads as a flat curve and `NaN` reads
 as no answer. `long_short_backtest` counts dropped rebalances in
 `n_skipped` — read it before you read `sharpe`.
+
+**`run_backtest` returns numbers and no provenance, deliberately.**
+`provenance.hpp:41-58` records an invariant kept *by construction*: no
+entry point does both caller-supplied bars and a `RunProvenance`. A run
+handed a hand-built series that then publishes an artifact naming
+`data/ibkr/.../AAPL.csv` is a forgery nothing downstream can detect.
+
+PER-242 required choosing between keeping that by construction and
+re-opening it properly. The tree settles it: **no library entry point
+produces provenance at all** — the only thing that does is `run_core`,
+still `int`-returning CLI code in `apps/cli/qe_run.cpp`. So there is
+nothing here to re-open, and these bindings do exactly what the
+functions beneath them do. For a reproducible artifact, run the `.qe`
+through `qe_run`, whose path loads from the config it records.
+`tests/test_qe_run_parity.py` asserts both halves: `qe_run` emits
+provenance, `run_backtest` must not grow it.
+
+That parity test is also S1's deferred acceptance — one `.qe` through
+both paths, equity curve identical point-for-point. It needs
+`tools/build-qe-run.sh` first, which builds `qe_run` **from the pinned
+submodule** rather than from a developer's own checkout: that one is on
+`main` while the submodule is on a tag, and comparing across two
+engines would blame the binding for every version difference.
 
 **Bar columns are views, not copies.** `BarSeries` is parallel
 `std::vector<double>` by architectural rule, so a column comes back as

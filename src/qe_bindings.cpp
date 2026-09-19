@@ -21,7 +21,11 @@
 /// voids every number in CLAUDE.md's performance table.
 
 #include "qe/analytics/ic.hpp"
+#include "qe/backtest/run_portfolio.hpp"
 #include "qe/data/multi_series.hpp"
+#include "qe/io/load_bars.hpp"
+#include "qe/io/qe_loader.hpp"
+#include "qe/strategy/factory.hpp"
 #include "qe/data/series.hpp"
 #include "qe/analytics/long_short.hpp"
 #include "qe/analytics/metrics.hpp"
@@ -35,6 +39,9 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/string_view.h>
 #include <nanobind/stl/vector.h>
+
+#include <memory>
+#include <variant>
 
 #include <string>
 
@@ -80,6 +87,33 @@ namespace {
         }
     }
     return "BarSeries::invariants_ok() failed for a reason this diagnostic does not model";
+}
+
+/// PER-242 / S4 — an evaluated `.qe`, held with the path it came from.
+struct PyQeConfig {
+    qe::dsl::QeValue value;
+    std::string      path;
+
+    [[nodiscard]] const qe::dsl::BacktestValue& backtest_or_throw() const {
+        if (const auto* b = std::get_if<qe::dsl::BacktestValue>(&value)) {
+            return *b;
+        }
+        if (const auto* l = std::get_if<qe::dsl::LiveValue>(&value)) {
+            return l->base;
+        }
+        throw nb::value_error(
+            "this config is not a backtest. `live(...)` exposes its `base`, but sweep / "
+            "walk_forward / research evaluate to different shapes and are not bound here.");
+    }
+};
+
+[[nodiscard]] const char* qe_kind_of(const qe::dsl::QeValue& v) {
+    if (std::holds_alternative<qe::dsl::BacktestValue>(v)) return "backtest";
+    if (std::holds_alternative<qe::dsl::SweepValue>(v)) return "sweep";
+    if (std::holds_alternative<qe::dsl::WalkForwardValue>(v)) return "walk_forward";
+    if (std::holds_alternative<qe::dsl::ResearchValue>(v)) return "research";
+    if (std::holds_alternative<qe::dsl::LiveValue>(v)) return "live";
+    return "unknown";
 }
 
 }  // namespace
@@ -382,4 +416,154 @@ NB_MODULE(_core, m) {
         "positive fraction, while `LongShortResult.max_dd` documents the "
         "most NEGATIVE excursion and reports e.g. -0.202. Same namespace, "
         "opposite conventions. Compare like with like.");
+
+    // ---- S4: evaluate a .qe and run it (PER-242) --------------------
+    //
+    // ## The provenance rule, and why this is not an omission
+    //
+    // `provenance.hpp:41-58` records an invariant kept BY CONSTRUCTION
+    // rather than by a check: no entry point does both caller-supplied
+    // bars AND a `RunProvenance`. Handing a run a hand-built series
+    // while it publishes an artifact naming `data/ibkr/.../AAPL.csv`
+    // is a forgery nothing downstream can detect.
+    //
+    // PER-242 required choosing deliberately between keeping that by
+    // construction and re-opening it properly. The tree decides it:
+    // **no library entry point produces provenance at all.**
+    // `run_single`, `run_portfolio`, `run_research` and
+    // `run_walk_forward_fixed` all take a series and return owning
+    // structs with no provenance in them; `QeSweepRunner` takes a
+    // loader callback and emits none. The only thing that assembles
+    // provenance is `run_core`, which is still `int`-returning CLI code
+    // in `apps/cli/qe_run.cpp:739` — PER-227 lifted the inner pieces
+    // and left that shell behind.
+    //
+    // So there is nothing here to re-open. These bindings return
+    // numbers and no provenance, which is exactly what the functions
+    // beneath them do. Re-opening the rule would first require lifting
+    // `run_core` into the library, which is a separate ticket.
+    //
+    // For a reproducible artifact, run the `.qe` through `qe_run`. That
+    // path loads from the config it records, so the two cannot
+    // disagree. Said out loud in `Backtest.summary`'s docstring too,
+    // because "why is there no provenance here" is a question a user
+    // will have exactly once.
+    nb::class_<PyQeConfig>(m, "QeConfig")
+        .def_prop_ro("path", [](const PyQeConfig& c) { return c.path; })
+        .def_prop_ro("kind", [](const PyQeConfig& c) { return qe_kind_of(c.value); },
+                     "backtest | sweep | walk_forward | research | live")
+        .def_prop_ro("capital",
+                     [](const PyQeConfig& c) { return c.backtest_or_throw().execution.capital; })
+        .def_prop_ro("leg_count",
+                     [](const PyQeConfig& c) {
+                         return c.backtest_or_throw().strategy.strategies.size();
+                     })
+        .def_prop_ro("leg_symbols",
+                     [](const PyQeConfig& c) {
+                         std::vector<std::string> out;
+                         for (const auto& leg : c.backtest_or_throw().strategy.strategies) {
+                             out.push_back(leg.symbol);
+                         }
+                         return out;
+                     })
+        .def("__repr__", [](const PyQeConfig& c) {
+            return std::string{"<QeConfig "} + qe_kind_of(c.value) + " '" + c.path + "'>";
+        });
+
+    m.def(
+        "load_qe",
+        [](const std::string& path) {
+            auto r = qe::io::load_qe(path);
+            if (!r) {
+                throw nb::value_error(r.error().message.c_str());
+            }
+            return PyQeConfig{std::move(r.value()), path};
+        },
+        nb::arg("path"),
+        "Parse and evaluate a .qe file. Raises with the loader's own "
+        "line/column message rather than returning a sentinel.");
+
+    m.def(
+        "load_bars",
+        [](const PyQeConfig& cfg) {
+            const auto& bv = cfg.backtest_or_throw();
+            if (bv.data.empty()) {
+                throw nb::value_error(
+                    "this config declares no `data` sources. A universe-expanded config "
+                    "carries its specs per leg, which this helper does not walk yet.");
+            }
+            std::shared_ptr<qe::net::IDataProvider> provider_cache;
+            qe::data::MultiBarSeries                mb;
+            for (std::size_t i = 0; i < bv.data.size(); ++i) {
+                const std::string sym =
+                    i < bv.strategy.strategies.size() ? bv.strategy.strategies[i].symbol : "";
+                auto lb = qe::io::load_bars(bv.data[i], sym, {}, provider_cache);
+                if (!lb) {
+                    throw nb::value_error(lb.error().message.c_str());
+                }
+                mb.add_symbol(sym.empty() ? ("sym" + std::to_string(i)) : sym,
+                              std::move(lb.value().bars));
+            }
+            if (auto a = mb.align_intersection(); !a) {
+                throw nb::value_error(a.error().message.c_str());
+            }
+            return mb;
+        },
+        nb::arg("config"),
+        "Resolve the config's `data` specs to an aligned MultiBarSeries. "
+        "Shares one provider across symbols, the way the CLI does.");
+
+    nb::class_<qe::analytics::Summary>(m, "Summary")
+        .def_ro("total_return", &qe::analytics::Summary::total_return)
+        .def_ro("cagr", &qe::analytics::Summary::cagr)
+        .def_ro("sharpe", &qe::analytics::Summary::sharpe)
+        .def_ro("sortino", &qe::analytics::Summary::sortino)
+        .def_ro("max_drawdown", &qe::analytics::Summary::max_drawdown)
+        .def_ro("win_rate", &qe::analytics::Summary::win_rate)
+        .def_ro("avg_win_loss", &qe::analytics::Summary::avg_win_loss)
+        .def_ro("n_trades", &qe::analytics::Summary::n_trades)
+        .def_ro("n_bars", &qe::analytics::Summary::n_bars);
+
+    nb::class_<qe::backtest::EquityPoint>(m, "EquityPoint")
+        .def_ro("timestamp_ns", &qe::backtest::EquityPoint::timestamp_ns)
+        .def_ro("equity", &qe::backtest::EquityPoint::equity);
+
+    nb::class_<qe::backtest::PerStrategyRun>(m, "PerStrategyRun")
+        .def_ro("name", &qe::backtest::PerStrategyRun::name)
+        .def_ro("capital", &qe::backtest::PerStrategyRun::capital,
+                "total_capital x weights[i] — the ACCOUNTING split, not a sizing knob.")
+        .def_ro("budget_notional", &qe::backtest::PerStrategyRun::budget_notional)
+        .def_ro("equity_curve", &qe::backtest::PerStrategyRun::equity_curve)
+        .def_prop_ro("n_trades",
+                     [](const qe::backtest::PerStrategyRun& r) { return r.trades.size(); },
+                     "Trades are not bound as objects yet — the count is what a caller "
+                     "needs to know a leg did anything.");
+
+    nb::class_<qe::backtest::PortfolioRun>(m, "PortfolioRun")
+        .def_ro("combined_equity", &qe::backtest::PortfolioRun::combined_equity)
+        .def_ro("total_capital", &qe::backtest::PortfolioRun::total_capital)
+        .def_ro("per_strategy", &qe::backtest::PortfolioRun::per_strategy);
+
+    m.def(
+        "run_backtest",
+        [](const PyQeConfig& cfg, const qe::data::MultiBarSeries& series) {
+            const auto& bv = cfg.backtest_or_throw();
+            qe::backtest::ExecutionConfig exec;
+            exec.commission_bps = bv.execution.commission_bps;
+            exec.slippage_bps   = bv.execution.slippage_bps;
+            auto r = qe::backtest::run_portfolio(bv.strategy, series, exec,
+                                                 bv.execution.capital, bv.execution.compound);
+            if (!r) {
+                throw nb::value_error(r.error().message.c_str());
+            }
+            return std::move(r.value());
+        },
+        nb::arg("config"), nb::arg("bars"),
+        "Run the config's strategy over CALLER-SUPPLIED bars.\n\n"
+        "Returns numbers and NO provenance, because the library function "
+        "beneath it does the same. That is the invariant in "
+        "provenance.hpp, not an omission: a run fed bars from outside "
+        "must not publish an artifact that names a file it never read. "
+        "For a reproducible artifact run the .qe through `qe_run`, whose "
+        "path loads from the config it records.");
 }
