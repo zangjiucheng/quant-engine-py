@@ -1,0 +1,128 @@
+# Publish the wheels attached to a GitHub Release to PyPI.
+#
+# This workflow does NOT build anything, and that is the design.
+#
+# The engine is a private submodule (`git@git.sr.ht:~jzhex/...`), so a
+# runner cannot clone it without a key — and that key would be
+# account-level on SourceHut, not repository-scoped, so handing it to a
+# third-party CI would grant read access to every private repository
+# there. The wheels are therefore built on the maintainer's Mac, where
+# the engine source already is, and attached to the release.
+#
+# What is left is the one thing a runner does better: publishing with
+# Trusted Publishing, so no PyPI API token exists anywhere to leak.
+#
+#   tools/build-wheel.sh          # local, builds + verifies the wheel
+#   gh release create vX.Y.Z dist/*.whl
+#   -> this workflow -> PyPI
+name: publish
+
+on:
+  release:
+    types: [published]
+  # For re-running a publish that failed after the release existed.
+  # Takes the tag explicitly rather than guessing from the default
+  # branch, which would publish whatever is newest.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.5.3)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # The gate the operator can stand in front of. PyPI's Trusted
+    # Publisher is configured for this environment by name; add
+    # required reviewers to it in Settings -> Environments and every
+    # publish waits for a click.
+    environment: pypi
+    permissions:
+      # Trusted Publishing: the runner mints a short-lived OIDC token
+      # that PyPI verifies. No API token is stored anywhere.
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Work out which tag we are publishing
+        id: tag
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          [ -n "$TAG" ] || { echo "::error::no tag from either trigger"; exit 1; }
+          case "$TAG" in
+            v*.*.*) ;;
+            *) echo "::error::'$TAG' is not vX.Y.Z"; exit 1 ;;
+          esac
+          echo "tag=$TAG"            >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}"    >> "$GITHUB_OUTPUT"
+
+      - name: Download the release's artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist --pattern '*'
+          ls -la dist
+
+      - name: Gate what is about to be published
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # An empty glob must not pass. A publish step handed nothing
+          # succeeds quietly, and "nothing was uploaded" would then look
+          # exactly like "everything was uploaded".
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          [ "${#wheels[@]}" -gt 0 ] \
+            || { echo "::error::no .whl in the release assets — nothing to publish"; exit 1; }
+
+          # No source distribution, ever. The engine is a private
+          # repository; an sdist would publish its source to PyPI
+          # permanently and irrevocably. This is the one mistake that
+          # cannot be undone by yanking a release.
+          sdists=(dist/*.tar.gz)
+          if [ "${#sdists[@]}" -gt 0 ]; then
+            echo "::error::a source distribution is attached: ${sdists[*]}"
+            echo "::error::an sdist contains the private engine source. Refusing."
+            exit 1
+          fi
+
+          # The wheel's version must be the tag's. Otherwise a release
+          # named v0.5.3 quietly ships 0.5.2 to PyPI under that name.
+          for w in "${wheels[@]}"; do
+            base="$(basename "$w")"
+            name="${base%%-*}"
+            ver="$(echo "$base" | cut -d- -f2)"
+            [ "$name" = "quant_engine_py" ] \
+              || { echo "::error::$base is not a quant-engine-py wheel"; exit 1; }
+            [ "$ver" = "$VERSION" ] \
+              || { echo "::error::$base is version $ver, but the tag says $VERSION"; exit 1; }
+            echo "  ok  $base"
+          done
+          echo "gated ${#wheels[@]} wheel(s) at $VERSION"
+
+      - name: Check the metadata PyPI will render
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet twine
+          python -m twine check dist/*.whl
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Fail rather than skip: a version already on PyPI means the
+          # release was cut twice, and silently doing nothing would hide
+          # that until somebody wondered why their fix never shipped.
+          skip-existing: false
+          print-hash: true

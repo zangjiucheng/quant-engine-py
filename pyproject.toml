@@ -16,6 +16,37 @@ requires-python = ">=3.10"
 # from.
 dependencies = ["numpy>=1.23"]
 
+# The README is the PyPI landing page. Without this the project page
+# is a blank box under the one-line summary, which is what a reader
+# who has never heard of this package sees first.
+readme = "README.md"
+license = { text = "Proprietary" }
+authors = [{ name = "Jiucheng Zang" }]
+keywords = ["backtesting", "quantitative-finance", "trading", "nanobind"]
+
+# Deliberately narrow, and each line is true rather than aspirational.
+# "macOS :: macOS X" with no Linux classifier is the honest statement
+# that there is no Linux wheel -- see the README.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: Other/Proprietary License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Documentation = "https://qe.jiucheng-zang.ca/python/"
+Homepage = "https://qe.jiucheng-zang.ca/"
+Source = "https://github.com/zangjiucheng/quant-engine-py"
+
 [tool.scikit-build]
 minimum-version = "0.10"
 build-dir = "build/{wheel_tag}"
