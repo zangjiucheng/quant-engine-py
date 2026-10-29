@@ -38,7 +38,18 @@ SKIP_VERIFY=0
 [[ -n "${VCPKG_ROOT:-}" ]] || fail "VCPKG_ROOT is not set (the engine uses vcpkg in manifest mode)"
 
 SUB="$HERE/extern/quant-engine"
-[[ -d "$SUB/.git" ]] || fail "the engine submodule is not checked out: git submodule update --init --recursive"
+# `-e`, not `-d`. A submodule's `.git` is a FILE -- a 47-byte gitdir
+# pointer -- so `-d` is false for a perfectly good checkout and this
+# refused to build against a submodule that was right there.
+# `qe/__init__.py` had it right next door with `.exists()`.
+#
+# And a second check, because `.git` alone only says "git knows about
+# this": a submodule recorded but never fetched leaves the directory
+# empty, and CMake's failure for that is forty missing headers.
+[[ -e "$SUB/.git" ]] \
+    || fail "the engine submodule is not checked out: git submodule update --init --recursive"
+[[ -f "$SUB/CMakeLists.txt" ]] \
+    || fail "the engine submodule is registered but empty: git submodule update --init --recursive"
 
 # The floor, and the single place it is written. The engine's own
 # `dist` preset uses the same number; they must not drift.
@@ -67,19 +78,74 @@ fi
 
 echo "▸ engine     $(git -C "$SUB" describe --tags --always) ($(git -C "$SUB" rev-parse --short HEAD))"
 echo "▸ floor      macOS $MACOSX_DEPLOYMENT_TARGET"
-echo "▸ triplet    ${TRIPLET_ARGS[1]:-(none — see the warning above)}"
+echo "▸ triplet    ${TRIPLET_ARGS[0]:-(none — see the warning above)}"
+
+# An interpreter that can actually build. The system python3 here is
+# nix's and has no pip at all, which surfaces mid-build as
+# "No module named pip" -- after the engine version, the floor and the
+# triplet have all been printed as though everything were fine. The
+# repo's own .venv is what the README and publish-bindings-pin.sh use.
+PY="${PY:-}"
+if [[ -z "$PY" ]]; then
+    if [[ -x "$HERE/.venv/bin/python" ]]; then PY="$HERE/.venv/bin/python"; else PY="$(command -v python3)"; fi
+fi
+[[ -n "$PY" ]] || fail "no python3 found"
+"$PY" -m pip --version >/dev/null 2>&1 \
+    || fail "$PY has no pip, so it cannot build a wheel.
+       The system python3 on this machine is nix's and ships without it.
+       Use the repo venv ($HERE/.venv) or set PY=/path/to/python."
+echo "▸ python     $PY ($("$PY" -c 'import sys;print(sys.version.split()[0])'))"
 
 rm -rf "$HERE/dist"
-CMAKE_ARGS="-DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET -DCMAKE_OSX_ARCHITECTURES=arm64"
-for a in "${TRIPLET_ARGS[@]:-}"; do [[ -n "$a" ]] && CMAKE_ARGS="$CMAKE_ARGS $a"; done
+
+# SEMICOLONS. `SKBUILD_CMAKE_ARGS` is a ;-separated list, and spaces
+# make the whole string ONE argument -- so
+# `CMAKE_OSX_DEPLOYMENT_TARGET` took the value
+# "13.0 -DCMAKE_OSX_ARCHITECTURES=arm64 -DVCPKG_TARGET_TRIPLET=..."
+# and scikit-build-core said so in a warning nobody was reading:
+#
+#   WARNING - CMAKE_OSX_DEPLOYMENT_TARGET not readable (13.0 -D...)
+#
+# The triplet silently never applied, vcpkg built against this
+# machine's SDK, and the wheel still TAGGED itself macosx_13_0 because
+# the tag comes from the environment variable. A correct label on
+# wrong contents -- the exact defect the triplet exists to prevent,
+# reproduced one layer up.
+CMAKE_ARGS="-DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET;-DCMAKE_OSX_ARCHITECTURES=arm64"
+for a in "${TRIPLET_ARGS[@]:-}"; do [[ -n "$a" ]] && CMAKE_ARGS="$CMAKE_ARGS;$a"; done
 export SKBUILD_CMAKE_ARGS="$CMAKE_ARGS"
+BUILD_LOG="$HERE/dist-build.log"
 
 echo "==> building the wheel"
 # `--wheel` only. `python -m build` would also produce the sdist that
 # step 2 above exists to prevent, and a later `twine upload dist/*`
 # would then publish it without anyone deciding to.
-python3 -m pip install --quiet --upgrade build
-python3 -m build --wheel --outdir "$HERE/dist"
+"$PY" -m pip install --quiet --upgrade build
+mkdir -p "$HERE/dist"
+"$PY" -m build --wheel --outdir "$HERE/dist" 2>&1 | tee "$BUILD_LOG"
+[[ "${PIPESTATUS[0]}" -eq 0 ]] || fail "the wheel build failed — see $BUILD_LOG"
+
+# The gate `publish-cli.sh` has and this did not, which is how the
+# semicolon bug above got as far as printing VERIFIED. A wheel that
+# claims macOS $MACOSX_DEPLOYMENT_TARGET while embedding object code
+# built against a newer SDK runs here and aborts at dyld on an older
+# Mac; the linker is the only thing that sees it, and only as a
+# warning.
+sdk_warnings=$(grep -c "was built for newer 'macOS' version" "$BUILD_LOG" || true)
+[[ "$sdk_warnings" -eq 0 ]] || fail \
+    "$sdk_warnings object files were built against a newer SDK than macOS $MACOSX_DEPLOYMENT_TARGET.
+       The wheel would still be TAGGED macosx_${MACOSX_DEPLOYMENT_TARGET%%.*}_0_arm64 and still
+       abort at dyld on an older Mac. Check that SKBUILD_CMAKE_ARGS is
+       semicolon-separated and that the triplet applied. See $BUILD_LOG"
+echo "  ✓ no SDK-mismatch warnings"
+
+# And that the triplet was the one asked for, read back from the build
+# rather than assumed from the argument.
+if [[ ${#TRIPLET_ARGS[@]} -gt 0 ]]; then
+    grep -q 'triplet arm64-osx-dist' "$BUILD_LOG" \
+        || fail "vcpkg did not use arm64-osx-dist. See $BUILD_LOG"
+    echo "  ✓ vcpkg used arm64-osx-dist"
+fi
 
 shopt -s nullglob
 wheels=("$HERE/dist"/*.whl)
@@ -105,7 +171,7 @@ fi
 echo "==> verifying in a clean venv outside this tree"
 VENV="$(mktemp -d)/venv"
 trap 'rm -rf "$(dirname "$VENV")"' EXIT
-python3 -m venv "$VENV"
+"$PY" -m venv "$VENV"
 "$VENV/bin/pip" install --quiet "$WHEEL"
 
 # Run from a directory that is NOT this repo, so the import-time

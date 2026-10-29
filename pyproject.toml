@@ -4,7 +4,12 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "quant-engine-py"
-version = "0.0.1"
+# Mirrors the engine tag this is built against, so
+# `quant-engine-py==0.5.3` is the binding for engine 0.5.3 and nothing
+# has to be looked up. A fix to the bindings alone, between engine
+# releases, goes out as 0.5.3.post1 -- which is what PyPI's post
+# releases are for.
+version = "0.5.3"
 description = "nanobind bindings for quant-engine"
 requires-python = ">=3.10"
 # numpy is a RUNTIME dependency, not just a test one: every bar column
