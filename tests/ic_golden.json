@@ -1,5 +1,5 @@
 {
- "engine_version": "0.5.3",
+ "engine_version": "0.5.4",
  "expected": {
   "horizon": 20,
   "n_bars": 400,
